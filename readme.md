@@ -103,6 +103,10 @@ pip install -r requirements.txt
 # 安装 MarkItDown 的完整依赖
 pip install "markitdown[all]"
 
+系统级依赖 (Linux): 为了让 MarkItDown 或 Trafilatura 更好地处理某些复杂格式，建议在 Ubuntu 上安装一些基础工具库（如果还没装的话）：
+sudo apt-get update
+sudo apt-get install -y ffmpeg libsm6 libxext6  # 处理图片/视频可能需要
+
 ```
 
 ### 2. 配置文件 (`config.py`)
