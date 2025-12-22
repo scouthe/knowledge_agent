@@ -15,9 +15,52 @@ from core.wechat import SYSTEM_STATE, send_wecom_msg
 from core.pipeline import process_content_to_obsidian
 from utils.inbox import write_inbox_job, list_inbox_jobs, mark_inbox_done
 from utils.logger import append_job_event, now_iso
+from fastapi import HTTPException, Header
+from pydantic import BaseModel
+from config import API_SECRET_KEY # 记得引入
 
 app = FastAPI()
 crypto = WeChatCrypto(TOKEN, ENCODING_AES_KEY, CORP_ID)
+
+
+
+# 定义接收的数据格式
+class SharePayload(BaseModel):
+    url: str
+    note: str = "" # 可选的备注
+
+@app.post("/api/share")
+async def share_content(
+    payload: SharePayload, 
+    x_api_key: str = Header(None) # 从 Header 获取密码
+):
+    """
+    接收安卓手机分享的接口
+    """
+    # === 👇 加入这两行调试代码 👇 ===
+    print(f"🛑 DEBUG - 系统期望的密码: [{API_SECRET_KEY}]")
+    print(f"🛑 DEBUG - 手机发来的密码: [{x_api_key}]")
+    # ==============================
+    # 1. 简单的安全校验
+    if x_api_key != API_SECRET_KEY:
+        raise HTTPException(status_code=403, detail="Invalid API Key")
+
+    print(f"📱 收到手机分享: {payload.url}")
+
+    # 2. 构造任务
+    job_id = str(uuid.uuid4())
+    job = {
+        "job_id": job_id,
+        "user_id": "mobile_user", # 标记来源
+        "content": payload.url + ("\n" + payload.note if payload.note else ""),
+        "received_at": now_iso(),
+        "source": "android_share"
+    }
+    
+    # 3. 写入队列
+    write_inbox_job(job)
+    
+    return {"status": "success", "job_id": job_id}
 
 # === Inbox Worker ===
 WORKER_LOCK = asyncio.Lock()
@@ -110,4 +153,5 @@ async def receive_msg(request: Request, msg_signature: str, timestamp: str, nonc
         return "fail"
 
 if __name__ == "__main__":
-    uvicorn.run("main:app", host="0.0.0.0", port=8888, reload=True)
+    uvicorn.run("main:app", host="0.0.0.0", port=8888, reload=True,
+                reload_excludes=[".git", ".venv", "__pycache__", "*.md"])

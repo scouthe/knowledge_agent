@@ -40,6 +40,9 @@ EMBEDDING_API_URL = "http://192.168.1.148:1234/v1"
 EMBEDDING_MODEL_NAME = "text-embedding-bge-m3" 
 
 CHROMA_COLLECTION_NAME = "knowledge_base"
-MIN_CONTENT_LENGTH = 100  # 太短的内容不存向量库
+MIN_CONTENT_LENGTH = 5  # 太短的内容不存向量库
 CHUNK_SIZE = 800          # 每一块大约 800 字符
 CHUNK_OVERLAP = 200       # 上下文重叠 200 字符
+
+# === API 安全配置 ===
+API_SECRET_KEY = "sk-123456" # 你自己随便设一个密码

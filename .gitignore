@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.dist/
+build/
+
+# venv
+venv/
+.venv/
+agent_env/
+
+# data / secrets
+data/
+*.log
+*.jsonl
+
+# chroma / vector db
+chroma_db/
+*.sqlite*
+*.duckdb
+
+# OS / IDE
+.DS_Store
+.vscode/
+.idea/
+
+# dotenv
+.env
+.env.*

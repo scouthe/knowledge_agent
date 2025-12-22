@@ -37,3 +37,43 @@ async def call_llm_analysis(content: str, category: str):
             "tags": ["AI_Error"],
             "analysis": f"错误: {str(e)}"
         }
+    
+def chat(user_query: str, system_prompt: str = "你是一个有用的助手。") -> str:
+    """
+    通用对话函数，供 Web UI (RAG) 使用
+    """
+    print(f"🤖 LLM 正在思考: {user_query[:20]}...")
+    
+    headers = {
+        "Content-Type": "application/json"
+    }
+    
+    payload = {
+        "model": LLM_MODEL, # 确保你的 config 里有 MODEL_NAME，没有的话写死字符串也可以
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_query}
+        ],
+        "temperature": 0.7,
+        "max_tokens": 2000,
+        "stream": False
+    }
+
+    try:
+        # 使用 httpx 发送请求 (复用之前的 LLM_API_URL)
+        response = httpx.post(
+            f"{LLM_API_URL}/v1/chat/completions", 
+            headers=headers, 
+            json=payload, 
+            timeout=60.0 # RAG 检索阅读量大，超时设长一点
+        )
+        response.raise_for_status()
+        
+        # 解析返回结果
+        result = response.json()
+        answer = result['choices'][0]['message']['content']
+        return answer
+
+    except Exception as e:
+        print(f"❌ Chat 接口调用失败: {e}")
+        return f"抱歉，我的大脑（LLM）暂时连接不上。错误信息：{e}"
