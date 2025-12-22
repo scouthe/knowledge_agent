@@ -1,0 +1,30 @@
+# === Web Framework (Backend) ===
+fastapi>=0.109.0
+uvicorn[standard]>=0.27.0
+python-multipart>=0.0.9  # 用于处理文件上传
+
+# === Web UI (Frontend) ===
+streamlit>=1.31.0
+
+# === Vector Database ===
+chromadb>=0.4.22
+
+# === WeChat Integration ===
+wechatpy>=1.8.18
+cryptography>=42.0.0     # WeChatPy 加密解密依赖
+
+# === Document Parsing & Scraping ===
+# 微软的文件转换工具 (支持 PDF, PPT, Word)
+# 注意: 安装时会自动拉取 pdf, ppt 等依赖
+markitdown[all]>=0.0.1   
+
+trafilatura>=1.6.0       # 网页正文提取
+xmltodict>=0.13.0        # 微信 XML 解析
+beautifulsoup4>=4.12.0
+
+# === Utilities ===
+httpx>=0.26.0            # 异步 HTTP 请求 (API调用核心)
+pyyaml>=6.0.1            # YAML Frontmatter 处理
+pydantic>=2.6.0          # 数据模型校验
+requests>=2.31.0         # 同步 HTTP 请求
+python-dotenv>=1.0.1     # (可选) 如果你想把 config 改成 .env 管理

@@ -210,7 +210,7 @@ with st.sidebar:
     # --- A. 快捷指令区 (新增了按钮) ---
     st.subheader("⚡ 快捷指令")
     
-    col1, col2 = st.columns(2)
+    col1, col2,col3 = st.columns(3)
     
     with col1:
         # 🗑️ 清除按钮
@@ -234,7 +234,24 @@ with st.sidebar:
             st.session_state.messages.append({"role": "assistant", "content": response})
             # 4. 强制刷新页面，这样主界面就会立刻显示出来
             st.rerun()
-
+    with col3:
+        # ✨ 新增：清理按钮
+        if st.button("🧹 同步库", use_container_width=True, help="删除文件后点击，清理无效的向量索引"):
+            with st.spinner("正在扫描无效索引..."):
+                try:
+                    # 调用后端接口
+                    res = httpx.post("http://localhost:8888/prune", timeout=30)
+                    data = res.json()
+                    if data.get("status") == "success":
+                        del_count = data['deleted_chunks']
+                        if del_count > 0:
+                            st.toast(f"✅ 清理完成！移除了 {del_count} 个无效切片。", icon="🗑️")
+                        else:
+                            st.toast("✅ 索引很干净，无需清理。", icon="✨")
+                    else:
+                        st.error(f"清理失败: {data.get('message')}")
+                except Exception as e:
+                    st.error(f"无法连接后端: {e}")
     # --- ✨ 新增: 速记/存链接窗口 (调用 FastAPI) ---
     with st.expander("📥 速记 / 存链接", expanded=True):
         # 使用 form 表单，这样点击提交后可以清空输入框(如果配合 session_state)
