@@ -21,6 +21,7 @@ markitdown[all]>=0.0.1
 trafilatura>=1.6.0       # 网页正文提取
 xmltodict>=0.13.0        # 微信 XML 解析
 beautifulsoup4>=4.12.0
+jieba>=0.42.1
 
 # === Utilities ===
 httpx>=0.26.0            # 异步 HTTP 请求 (API调用核心)
@@ -28,4 +29,3 @@ pyyaml>=6.0.1            # YAML Frontmatter 处理
 pydantic>=2.6.0          # 数据模型校验
 requests>=2.31.0         # 同步 HTTP 请求
 python-dotenv>=1.0.1     # (可选) 如果你想把 config 改成 .env 管理
-

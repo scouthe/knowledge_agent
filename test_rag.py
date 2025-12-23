@@ -118,12 +118,7 @@ def handle_list_request(collection, query_text):
     
     # 直接从 Chroma 获取元数据 (limit 设大一点，比如 100)
     # 这是一个数据库查询操作，不是向量搜索
-    results = collection.get(
-        include=["metadatas"],
-        limit=100 
-    )
-    
-    metadatas = results['metadatas']
+    metadatas = fetch_all_metadatas(collection)
     
     # 过滤和去重
     unique_titles = set()
@@ -165,8 +160,7 @@ def list_articles(filter_today=True):
     collection = client.get_or_create_collection(name=CHROMA_COLLECTION_NAME)
     
     # 获取所有元数据
-    results = collection.get(include=["metadatas"])
-    metadatas = results['metadatas']
+    metadatas = fetch_all_metadatas(collection)
     
     if not metadatas:
         print("📭 知识库是空的。")

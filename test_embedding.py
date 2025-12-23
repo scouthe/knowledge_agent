@@ -1,10 +1,10 @@
 # test_embedding.py
 import httpx
 import json
+from config import EMBEDDING_API_URL, EMBEDDING_MODEL_NAME
 
-# 修改为你的 LM Studio 配置
-API_URL = "http://192.168.1.148:1234/v1/embeddings"
-MODEL_NAME = "text-embedding-bge-m3" # 你的模型名
+API_URL = f"{EMBEDDING_API_URL}/embeddings"
+MODEL_NAME = EMBEDDING_MODEL_NAME
 
 def test_embedding():
     print(f"📡 正在测试 Embedding 接口: {API_URL}")

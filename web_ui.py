@@ -16,8 +16,10 @@ from config import (
     LLM_MODEL,
     OBSIDIAN_ROOT,
     EMBEDDING_MODEL_NAME,
+    EMBEDDING_API_URL,
     JOBS_LOG_PATH       # 确保 config.py 里有 JOBS_LOG_PATH = "logs/jobs.jsonl"
 )
+from core.retriever import hybrid_search
 
 # === 2. 页面初始化 ===
 st.set_page_config(page_title="Knowledge OS", page_icon="🧠", layout="wide")
@@ -30,7 +32,7 @@ def get_vector_store():
         client = chromadb.PersistentClient(path=CHROMA_DB_PATH)
         emb_fn = embedding_functions.OpenAIEmbeddingFunction(
             api_key="lm-studio",
-            api_base=LLM_API_URL, 
+            api_base=EMBEDDING_API_URL,
             model_name=EMBEDDING_MODEL_NAME  
         )
         collection = client.get_or_create_collection(
@@ -65,9 +67,11 @@ def detect_intent_with_llm(query, last_topic):
     
     try:
         resp = httpx.post(LLM_API_URL, json=payload, timeout=10)
-        result = resp.json()['choices'][0]['message']['content'].strip().upper()
+        data = resp.json()
+        result = data['choices'][0]['message']['content'].strip().upper()
         return "TRUE" in result
-    except:
+    except Exception as e:
+        st.warning(f"意图识别失败: {e}")
         return False
 
 def check_is_list_request(query):
@@ -75,12 +79,48 @@ def check_is_list_request(query):
     triggers = ["有哪些", "有什么", "列一下", "列出", "清单", "多少篇", "list"]
     return any(t in query for t in triggers) and ("文章" in query or "笔记" in query)
 
+def fetch_all_metadatas(batch_size=500):
+    """分页拉取全部元数据，避免 limit 限制"""
+    if not collection:
+        return []
+    all_meta = []
+    offset = 0
+    while True:
+        results = collection.get(include=["metadatas"], limit=batch_size, offset=offset)
+        metadatas = results.get("metadatas") or []
+        if not metadatas:
+            break
+        all_meta.extend(metadatas)
+        if len(metadatas) < batch_size:
+            break
+        offset += batch_size
+    return all_meta
+
+def resolve_hybrid_hit(hit):
+    """将混合检索结果补全为可用的文档与元数据"""
+    doc_id = hit.get("doc_id", "")
+    doc_text = hit.get("content", "")
+    meta = {}
+    if not collection:
+        return doc_id, doc_text, meta
+
+    try:
+        if "_" in doc_id:
+            res = collection.get(ids=[doc_id], include=["documents", "metadatas"])
+        else:
+            res = collection.get(where={"parent_id": doc_id}, include=["documents", "metadatas"], limit=1)
+        if res.get("ids"):
+            doc_text = res["documents"][0] or doc_text
+            meta = res["metadatas"][0] or {}
+    except Exception:
+        pass
+    return doc_id, doc_text, meta
+
 def get_article_list(filter_today=False):
     """获取文章列表字符串"""
     if not collection: return "数据库未连接"
     try:
-        results = collection.get(include=["metadatas"], limit=100)
-        metadatas = results['metadatas']
+        metadatas = fetch_all_metadatas()
         today_str = time.strftime("%Y-%m-%d")
         unique_titles = set()
         
@@ -446,56 +486,77 @@ else:
             # 2. RAG 检索
             else:
                 placeholder.markdown("🧠 思考中...")
+                if not collection:
+                    full_response = "❌ 向量库未连接，无法检索。"
+                    placeholder.error(full_response)
+                    st.session_state.messages.append({"role": "assistant", "content": full_response})
+                    continue
                 
                 # (1) 意图判断 (追问模式)
                 is_anchored = False
-                search_kwargs = {"query_texts": [user_input], "n_results": 5}
                 
                 if st.session_state.history_doc_ids:
                     if detect_intent_with_llm(user_input, st.session_state.last_topic):
                         is_anchored = True
                         st.toast("⚓️ 触发追问模式")
-                        search_kwargs["where"] = {"parent_id": {"$in": st.session_state.history_doc_ids}}
                     else:
                         st.toast("🌐 新话题，全局搜索")
                         st.session_state.history_doc_ids = []
 
                 # (2) 执行搜索
                 try:
-                    results = collection.query(**search_kwargs)
-                    documents = results['documents'][0]
-                    metadatas = results['metadatas'][0]
-                    
-                    # 自动降级 (如果追问没搜到，转全局)
-                    if not documents and is_anchored:
-                        st.toast("🔄 追问无果，切换全局搜索...")
-                        del search_kwargs["where"]
-                        results = collection.query(**search_kwargs)
-                        documents = results['documents'][0]
-                        metadatas = results['metadatas'][0]
-                        is_anchored = False
+                    documents = []
+                    metadatas = []
+                    current_ids = []
+                    context_parts = []
+                    seen_parent_ids = set()
+
+                    if is_anchored and st.session_state.history_doc_ids:
+                        results = collection.query(
+                            query_texts=[user_input],
+                            n_results=10,
+                            where={"parent_id": {"$in": st.session_state.history_doc_ids}}
+                        )
+                        documents = results.get("documents", [[]])[0]
+                        metadatas = results.get("metadatas", [[]])[0]
+                        for i, doc in enumerate(documents):
+                            meta = metadatas[i] if i < len(metadatas) else {}
+                            parent_id = meta.get("parent_id")
+                            if parent_id:
+                                current_ids.append(parent_id)
+                            context_parts.append(f"【来源{i+1}】: {doc}")
+                        if not documents:
+                            st.toast("🔄 追问无果，切换全局搜索...")
+                            is_anchored = False
+
+                    if not is_anchored:
+                        hits = hybrid_search(user_input, top_k=10)
+                        for i, hit in enumerate(hits):
+                            doc_id, doc_text, meta = resolve_hybrid_hit(hit)
+                            if not doc_text:
+                                continue
+                            parent_id = doc_id.split("_")[0] if "_" in doc_id else doc_id
+                            if parent_id in seen_parent_ids:
+                                continue
+                            seen_parent_ids.add(parent_id)
+                            documents.append(doc_text)
+                            metadatas.append(meta or {})
+                            if parent_id:
+                                current_ids.append(parent_id)
+                            context_parts.append(f"【来源{i+1}】: {doc_text}")
 
                     if not documents:
                         full_response = "🤔 知识库里没有找到相关内容。"
                     else:
-                        # (3) 组装 Context
-                        context_parts = []
-                        current_ids = []
-                        for i, doc in enumerate(documents):
-                            meta = metadatas[i]
-                            pid = meta.get('parent_id') or meta.get('source')
-                            if pid: current_ids.append(pid)
-                            context_parts.append(f"【来源{i+1}】: {doc}")
-                        
                         # 更新 Session
                         if not is_anchored:
                             st.session_state.history_doc_ids = list(set(current_ids))
                             st.session_state.last_topic = user_input
-                        
-                        # (4) 调用 LLM
+
+                        # (3) 调用 LLM
                         context_str = "\n\n".join(context_parts)
                         sys_prompt = f"你是一个助手。{'用户正在追问，' if is_anchored else ''}请基于已知信息回答。\n\n【已知信息】:\n{context_str}"
-                        
+
                         payload = {
                             "model": LLM_MODEL,
                             "messages": [
@@ -504,25 +565,26 @@ else:
                             ],
                             "temperature": 0.7
                         }
-                        
+
                         try:
                             resp = httpx.post(LLM_API_URL, json=payload, timeout=60)
-                            full_response = resp.json()['choices'][0]['message']['content']
+                            data = resp.json()
+                            full_response = data['choices'][0]['message']['content']
                         except Exception as e:
                             full_response = f"❌ LLM 调用失败: {e}"
 
                     placeholder.markdown(full_response)
-                    
+
                     # 显示引用源
                     if documents:
                         with st.expander("📚 查看参考来源", expanded=False):
                             for i, doc in enumerate(documents):
-                                meta = metadatas[i]
+                                meta = metadatas[i] if i < len(metadatas) else {}
                                 st.markdown(f"**来源 {i+1}**: `{meta.get('title','无标题')}`")
-                                st.caption(f"路径: {meta.get('rel_path','未知')}")
+                                st.caption(f"路径: {meta.get('file_path','未知')}")
                                 st.text(doc[:100]+"...")
                                 st.divider()
-                                
+
                 except Exception as e:
                     full_response = f"检索失败: {e}"
                     placeholder.error(full_response)

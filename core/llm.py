@@ -31,12 +31,7 @@ async def call_llm_analysis(content: str, category: str):
             return json.loads(clean)
     except Exception as e:
         print(f"❌ LLM 失败: {e}")
-        return {
-            "kb_title": f"未命名_{int(time.time())}",
-            "summary": "AI 分析失败",
-            "tags": ["AI_Error"],
-            "analysis": f"错误: {str(e)}"
-        }
+        raise
     
 def chat(user_query: str, system_prompt: str = "你是一个有用的助手。") -> str:
     """
@@ -62,9 +57,9 @@ def chat(user_query: str, system_prompt: str = "你是一个有用的助手。")
     try:
         # 使用 httpx 发送请求 (复用之前的 LLM_API_URL)
         response = httpx.post(
-            f"{LLM_API_URL}/v1/chat/completions", 
-            headers=headers, 
-            json=payload, 
+            LLM_API_URL,
+            headers=headers,
+            json=payload,
             timeout=60.0 # RAG 检索阅读量大，超时设长一点
         )
         response.raise_for_status()

@@ -373,3 +373,9 @@
 {"ts": "2025-12-23T13:47:42", "job_id": "c1d7ac62-5004-4a55-8df4-5e75f59b774c", "status": "RUNNING", "step": "save_vector_start", "url": "", "user_id": "", "message": "开始向量化...", "error": null}
 {"ts": "2025-12-23T13:47:42", "job_id": "c1d7ac62-5004-4a55-8df4-5e75f59b774c", "status": "RUNNING", "step": "save_vector_success", "url": "", "user_id": "", "message": "向量化完成，切分 3 块", "error": null, "extra": {"chunk_count": 3, "doc_id": "f7f0c8cd8db3cd7ef795471d6d6abc35"}}
 {"ts": "2025-12-23T13:47:43", "job_id": "c1d7ac62-5004-4a55-8df4-5e75f59b774c", "status": "SUCCESS_NOTIFY_FAIL", "step": "done", "url": "", "user_id": "", "message": "耗时 8.53s", "error": null}
+{"ts": "2025-12-23T15:45:30", "job_id": "d2ba0382-8df2-44c0-a418-4e42c14b5412", "status": "RUNNING", "step": "worker_pick", "url": "", "user_id": "", "message": "", "error": null}
+{"ts": "2025-12-23T15:45:30", "job_id": "d2ba0382-8df2-44c0-a418-4e42c14b5412", "status": "RUNNING", "step": "start", "url": "", "user_id": "web", "message": "", "error": null}
+{"ts": "2025-12-23T15:45:30", "job_id": "d2ba0382-8df2-44c0-a418-4e42c14b5412", "status": "RUNNING", "step": "crawl_local", "url": "https://news.china.com/socialgd/10000169/20251223/49101310.html", "user_id": "", "message": "", "error": null}
+{"ts": "2025-12-23T15:45:37", "job_id": "d2ba0382-8df2-44c0-a418-4e42c14b5412", "status": "RUNNING", "step": "save_vector_start", "url": "", "user_id": "", "message": "开始向量化...", "error": null}
+{"ts": "2025-12-23T15:45:38", "job_id": "d2ba0382-8df2-44c0-a418-4e42c14b5412", "status": "RUNNING", "step": "save_vector_success", "url": "", "user_id": "", "message": "向量化完成，切分 3 块", "error": null, "extra": {"chunk_count": 3, "doc_id": "057732645c23e80f3812a0b7cc145755"}}
+{"ts": "2025-12-23T15:45:38", "job_id": "d2ba0382-8df2-44c0-a418-4e42c14b5412", "status": "SUCCESS_NOTIFY_FAIL", "step": "done", "url": "", "user_id": "", "message": "耗时 7.61s", "error": null}

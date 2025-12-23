@@ -3,6 +3,7 @@ import asyncio
 import uuid
 import json
 import os
+import re
 import xmltodict
 import chromadb
 from fastapi import FastAPI, Request, BackgroundTasks, HTTPException, Header
@@ -48,16 +49,23 @@ def sync_prune_vectors():
     
     ids_to_delete = []
     active_paths = set()
+    missing_path_count = 0
+    ambiguous_hash_count = 0
     
     print("📂 正在扫描本地文件系统...")
-    existing_files_map = {}
+    hash6_map = {}
     for root, dirs, files in os.walk(OBSIDIAN_ROOT):
         dirs[:] = [d for d in dirs if not d.startswith('.')]
         for file in files:
-            if file.endswith('.md'):
-                existing_files_map[file] = os.path.join(root, file)
-
-    print(f"✅ 本地共扫描到 {len(existing_files_map)} 个 Markdown 文件")
+            if not file.endswith('.md'):
+                continue
+            match = re.search(r'__([0-9a-fA-F]{6})\.md$', file)
+            if not match:
+                continue
+            hash6 = match.group(1).lower()
+            hash6_map.setdefault(hash6, []).append(os.path.join(root, file))
+    
+    print(f"✅ 本地共扫描到 {sum(len(v) for v in hash6_map.values())} 个 Markdown 文件(可解析hash)")
     
     total_docs = len(all_data['ids']) if all_data['ids'] else 0
 
@@ -66,15 +74,26 @@ def sync_prune_vectors():
         # 兼容不同版本的字段名
         stored_path = meta.get('file_path') or None
         
-        if not stored_path: continue
+        if not stored_path:
+            parent_id = meta.get("parent_id") or doc_id.split("_")[0]
+            hash6 = parent_id[:6].lower() if parent_id else ""
+            candidates = hash6_map.get(hash6, [])
+            if len(candidates) == 1:
+                stored_path = candidates[0]
+            elif len(candidates) > 1:
+                ambiguous_hash_count += 1
+                continue
+            else:
+                missing_path_count += 1
+                continue
 
-        file_name = os.path.basename(stored_path)
-        
-        if file_name in existing_files_map:
-            real_path = existing_files_map[file_name]
-            active_paths.add(real_path)
+        if not os.path.isabs(stored_path):
+            stored_path = os.path.join(OBSIDIAN_ROOT, stored_path)
+
+        if os.path.exists(stored_path):
+            active_paths.add(stored_path)
         else:
-            print(f"🗑️ 发现失效索引: {file_name}")
+            print(f"🗑️ 发现失效索引: {stored_path}")
             ids_to_delete.append(doc_id)
 
     deleted_count = 0
@@ -89,7 +108,9 @@ def sync_prune_vectors():
         "status": "success", 
         "total_checked": total_docs,
         "deleted_chunks": deleted_count,
-        "active_files_count": len(active_paths)
+        "active_files_count": len(active_paths),
+        "missing_path_count": missing_path_count,
+        "ambiguous_hash_count": ambiguous_hash_count
     }
 
 # === 3. 数据模型 ===

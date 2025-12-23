@@ -19,7 +19,7 @@ TOKEN = "Zjx3iRIbV1yzJRSB0ewMOOsESdUbO43R"
 ENCODING_AES_KEY = "3NTSa7EenJNAWnB4TVKb6AoffEedjFjfbcxcd56h3xR"
 
 # === LLM 配置 ===
-LLM_API_URL = "http://192.168.1.148:1234/v1/chat/completions"
+LLM_API_URL = "http://localhost:1234/v1/chat/completions"
 LLM_MODEL = "qwen2.5-14b-instruct"
 
 # === 爬虫配置 ===
@@ -35,7 +35,7 @@ SQLITE_DB_PATH = os.path.join(DATA_DIR, "index.db")
 
 # === RAG 配置 ===
 CHROMA_DB_PATH = os.path.join(DATA_DIR, "chroma_db")
-EMBEDDING_API_URL = "http://192.168.1.148:1234/v1"
+EMBEDDING_API_URL = "http://127.0.0.1:1234/v1"
 # ⚠️ 必须填你 LM Studio 里加载的真实模型ID
 EMBEDDING_MODEL_NAME = "text-embedding-bge-m3" 
 
