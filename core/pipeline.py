@@ -6,17 +6,32 @@ from utils.logger import append_job_event
 from utils.helpers import url_hash
 from core.crawler import fetch_via_trafilatura, fetch_via_jina
 from core.llm import call_llm_analysis
-from core.storage import save_to_obsidian
+from core.storage import save_to_obsidian, save_to_vector_db
 from core.wechat import send_wecom_msg
-from core.index import save_to_keyword_index # 引入新模块
-from core.storage import save_to_obsidian, save_to_vector_db # 引入新函数
+# from core.index import save_to_keyword_index # 如有需要可取消注释
 
-async def process_content_to_obsidian(job_id: str, content: str, user_id: str):
+async def process_content_to_obsidian(job_id: str, content: str, user_id: str, mode: str = "auto"):
     t0 = time.time()
     append_job_event(job_id, "RUNNING", step="start", user_id=user_id)
     
+    # === ✨ 修复点 1: 自动补全协议头 ===
+    # 只有当用户明确指定 mode="crawl" 时才触发，防止误伤普通笔记
+    if mode == "crawl" and not content.startswith(("http://", "https://")):
+        # 简单判定：内容不包含空格（通常URL没空格），且包含点号（如 baidu.com）
+        if " " not in content.strip() and "." in content:
+            print(f"🔧 [Job {job_id}] 检测到缺少协议头，自动补全 https://")
+            content = f"https://{content}"
+
     url_pattern = r'https?://(?:[-\w.]|(?:%[\da-fA-F]{2}))+[^\s]*'
-    urls = re.findall(url_pattern, content)
+    
+    # === ✨ 修复点 2: 逻辑判断 ===
+    if mode == "note":
+        urls = [] # 强制清空 URL，不走爬虫分支
+        print(f"📝 Job {job_id}: 用户指定为纯笔记模式，强制跳过 URL 解析")
+    else:
+        # 默认模式 ("auto" 或 "crawl") 才去解析 URL
+        urls = re.findall(url_pattern, content)
+        
     payload = {}
     target_url = ""
 
@@ -44,7 +59,7 @@ async def process_content_to_obsidian(job_id: str, content: str, user_id: str):
             payload["doc_id"] = url_hash(target_url)
             
     else:
-        # 个人笔记
+        # 个人笔记 (当 mode="note" 时，或者 mode="crawl" 但真的没输链接时走进这里)
         payload = {
             "type": "note",
             "category": "个人笔记",
@@ -61,6 +76,7 @@ async def process_content_to_obsidian(job_id: str, content: str, user_id: str):
 
     # === 2. AI 分析 ===
     try:
+        # 如果是笔记，也可以让 AI 帮忙打标签或润色，这里保持原样调用
         ai_res = await call_llm_analysis(payload["content"], payload["category"])
     except Exception as e:
         await send_wecom_msg(user_id, f"⚠️ AI 失败: {e}")
@@ -69,7 +85,6 @@ async def process_content_to_obsidian(job_id: str, content: str, user_id: str):
     # === 3. 保存 (双写模式) ===
     try:
         # A. 存文件 (Truth)
-        # 注意：这里接收两个返回值
         path, doc_id = save_to_obsidian(payload, ai_res)
         
         # B. 存向量 (Brain)
@@ -89,18 +104,13 @@ async def process_content_to_obsidian(job_id: str, content: str, user_id: str):
 
     # === 4. 通知 ===
     try:
-        # 1. 先定义变量
         file_name = os.path.basename(path)
         duration = round(time.time() - t0, 2)
         
-        # 2. 发送微信
         ok = await send_wecom_msg(user_id, f"✅ **入库成功**\n📄 {file_name}")
         status = "SUCCESS" if ok else "SUCCESS_NOTIFY_FAIL"
         
-        # 3. 记日志
         append_job_event(job_id, status, step="done", message=f"耗时 {duration}s")
-        
-        # 4. 控制台打印 (现在变量都有了)
         print(f"✅ 任务结束 [耗时 {duration}s]: {file_name}")
     except Exception:
         pass

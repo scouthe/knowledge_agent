@@ -18,7 +18,7 @@ async def call_llm_analysis(content: str, category: str):
         "temperature": 0.1,
         "messages": [
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": f"内容：\n{content[:15000]}"}
+            {"role": "user", "content": f"内容：\n{content[:25000]}"}
         ]
     }
 

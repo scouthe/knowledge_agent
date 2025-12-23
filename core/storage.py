@@ -114,7 +114,7 @@ def save_to_obsidian(raw_data: dict, ai_data: dict):
         elif "xiaohongshu" in url: source = "小红书"
         elif "weixin" in url: source = "公众号"
         elif raw_data.get("site"): source = raw_data.get("site")
-        file_name = f"{source}-{date_short}-{safe_title}__{hash6}.md"
+        file_name = f"{date_short}-{source}-{safe_title}__{hash6}.md"
 
     dir_path = os.path.join(OBSIDIAN_ROOT, folder, year_month)
     os.makedirs(dir_path, exist_ok=True)
