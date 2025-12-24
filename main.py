@@ -4,9 +4,10 @@ import uuid
 import json
 import os
 import re
+import time
 import xmltodict
 import chromadb
-from fastapi import FastAPI, Request, BackgroundTasks, HTTPException, Header
+from fastapi import FastAPI, Request, BackgroundTasks, HTTPException, Header, UploadFile, File, Form
 from fastapi.responses import PlainTextResponse
 from wechatpy.crypto import WeChatCrypto
 from wechatpy.replies import create_reply
@@ -20,13 +21,31 @@ from config import (
     CORP_ID, 
     API_SECRET_KEY, 
     CHROMA_DB_PATH,    # ⚠️ 请确认 config.py 里是 CHROMA_PATH 还是 CHROMA_DB_PATH，这里要一致
-    OBSIDIAN_ROOT
+    OBSIDIAN_ROOT,
+    SPECIAL_USER
 )
 
 from core.wechat import SYSTEM_STATE, send_wecom_msg
 from core.pipeline import process_content_to_obsidian
 from utils.inbox import write_inbox_job, list_inbox_jobs, mark_inbox_done
 from utils.logger import append_job_event, now_iso, get_job_latest_status # 👈 引入新函数
+from utils.auth import (
+    init_auth_db,
+    create_user,
+    verify_user,
+    issue_token,
+    verify_token,
+    reset_password,
+    list_users,
+    admin_set_password,
+    delete_user,
+)
+from utils.rebuild import rebuild_user_vectors
+from utils.daily_summary import generate_daily_summary, build_daily_list
+from core.retriever import hybrid_search
+from core.llm import call_llm_analysis
+from core.llm import chat as llm_chat
+from core.storage import resolve_user_root
 
 app = FastAPI()
 
@@ -39,7 +58,7 @@ collection = chroma_client.get_or_create_collection(name="knowledge_base")
 
 # === 2. 核心功能函数 ===
 
-def sync_prune_vectors():
+def sync_prune_vectors(user_root: str):
     """清理无效索引 (安全版)"""
     print("🧹 开始执行向量库清理 (安全模式)...")
     try:
@@ -54,7 +73,7 @@ def sync_prune_vectors():
     
     print("📂 正在扫描本地文件系统...")
     hash6_map = {}
-    for root, dirs, files in os.walk(OBSIDIAN_ROOT):
+    for root, dirs, files in os.walk(user_root):
         dirs[:] = [d for d in dirs if not d.startswith('.')]
         for file in files:
             if not file.endswith('.md'):
@@ -88,8 +107,10 @@ def sync_prune_vectors():
                 continue
 
         if not os.path.isabs(stored_path):
-            stored_path = os.path.join(OBSIDIAN_ROOT, stored_path)
+            stored_path = os.path.join(user_root, stored_path)
 
+        if not stored_path.startswith(user_root):
+            continue
         if os.path.exists(stored_path):
             active_paths.add(stored_path)
         else:
@@ -118,10 +139,49 @@ class SharePayload(BaseModel):
     url: str
     note: str = ""
 
+class RegisterPayload(BaseModel):
+    username: str
+    password: str
+
+class LoginPayload(BaseModel):
+    username: str
+    password: str
+
+class ResetPayload(BaseModel):
+    username: str
+    old_password: str
+    new_password: str
+
+class AdminPasswordPayload(BaseModel):
+    username: str
+    new_password: str
+
+class AdminUserPayload(BaseModel):
+    username: str
+    password: str
+
+class CategoryPayload(BaseModel):
+    name: str
+
 class IngestPayload(BaseModel):
-    user_id: str
     content: str
     mode: str = "auto"
+    folder: str | None = None
+
+def require_user(authorization: str | None) -> str:
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing token")
+    token = authorization.split(" ", 1)[1].strip()
+    username = verify_token(token)
+    if not username:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    return username
+
+def require_admin(authorization: str | None) -> str:
+    username = require_user(authorization)
+    if username != SPECIAL_USER:
+        raise HTTPException(status_code=403, detail="Admin only")
+    return username
 
 # === 4. API 路由 ===
 
@@ -143,19 +203,206 @@ async def share_content(payload: SharePayload, x_api_key: str = Header(None)):
     write_inbox_job(job)
     return {"status": "success", "job_id": job_id}
 
+@app.post("/auth/register")
+async def register(payload: RegisterPayload):
+    ok, msg = create_user(payload.username, payload.password)
+    if not ok:
+        raise HTTPException(status_code=400, detail=msg)
+    return {"status": "success"}
+
+@app.post("/auth/login")
+async def login(payload: LoginPayload):
+    if not verify_user(payload.username, payload.password):
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+    token = issue_token(payload.username)
+    return {"token": token, "username": payload.username}
+
+@app.post("/auth/reset")
+async def reset(payload: ResetPayload):
+    ok, msg = reset_password(payload.username, payload.old_password, payload.new_password)
+    if not ok:
+        raise HTTPException(status_code=400, detail=msg)
+    return {"status": "success"}
+
+@app.get("/admin/users")
+async def admin_users(authorization: str = Header(None)):
+    require_admin(authorization)
+    return {"users": list_users()}
+
+@app.post("/admin/users")
+async def admin_create_user(payload: AdminUserPayload, authorization: str = Header(None)):
+    require_admin(authorization)
+    ok, msg = create_user(payload.username, payload.password)
+    if not ok:
+        raise HTTPException(status_code=400, detail=msg)
+    return {"status": "success"}
+
+@app.post("/admin/users/reset")
+async def admin_reset_user(payload: AdminPasswordPayload, authorization: str = Header(None)):
+    require_admin(authorization)
+    ok, msg = admin_set_password(payload.username, payload.new_password)
+    if not ok:
+        raise HTTPException(status_code=400, detail=msg)
+    return {"status": "success"}
+
+@app.delete("/admin/users/{username}")
+async def admin_delete_user(username: str, authorization: str = Header(None)):
+    require_admin(authorization)
+    ok, msg = delete_user(username)
+    if not ok:
+        raise HTTPException(status_code=400, detail=msg)
+    return {"status": "success"}
+
 @app.post("/ingest")
-async def ingest(payload: IngestPayload):
+async def ingest(payload: IngestPayload, authorization: str = Header(None)):
+    username = require_user(authorization)
     job_id = str(uuid.uuid4())
     job = {
         "job_id": job_id,
-        "user_id": payload.user_id,
+        "user_id": username,
         "content": payload.content,
         "received_at": now_iso(),
         "source": "api",
-        "process_mode": payload.mode
+        "process_mode": payload.mode,
+        "folder": payload.folder
     }
     write_inbox_job(job)
     return {"status": "accepted", "job_id": job_id}
+
+@app.post("/api/category")
+async def create_category(payload: CategoryPayload, authorization: str = Header(None)):
+    username = require_user(authorization)
+    safe_name = payload.name.strip()
+    if not safe_name:
+        raise HTTPException(status_code=400, detail="Empty category")
+    root = resolve_user_root(username)
+    path = os.path.join(root, safe_name)
+    os.makedirs(os.path.join(path, "Notes"), exist_ok=True)
+    os.makedirs(os.path.join(path, "Articles"), exist_ok=True)
+    return {"status": "success", "path": path}
+
+@app.get("/api/categories")
+async def list_categories(authorization: str = Header(None)):
+    username = require_user(authorization)
+    root = resolve_user_root(username)
+    categories = []
+    defaults = {"Notes", "Articles", "Inbox", ".obsidian"}
+    try:
+        for name in os.listdir(root):
+            path = os.path.join(root, name)
+            if os.path.isdir(path) and name not in defaults and not name.startswith("."):
+                categories.append(name)
+    except Exception:
+        pass
+    categories.sort()
+    return {"categories": categories}
+
+@app.post("/api/upload")
+async def upload_file(
+    authorization: str = Header(None),
+    file: UploadFile = File(...),
+    folder: str | None = Form(None),
+):
+    username = require_user(authorization)
+    user_root = resolve_user_root(username)
+    try:
+        from markitdown import MarkItDown
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"MarkItDown 不可用: {e}")
+
+    suffix = os.path.splitext(file.filename or "")[1]
+    if not suffix:
+        suffix = ".bin"
+    tmp_path = os.path.join("/tmp", f"upload_{uuid.uuid4().hex}{suffix}")
+    with open(tmp_path, "wb") as f:
+        f.write(await file.read())
+
+    try:
+        md = MarkItDown().convert(tmp_path).text_content
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"解析失败: {e}")
+    finally:
+        try:
+            os.remove(tmp_path)
+        except Exception:
+            pass
+
+    clean_name = os.path.splitext(file.filename or "upload")[0]
+    save_name = f"{time.strftime('%Y%m%d_%H%M%S')}_{clean_name}.md"
+    target_folder = folder.strip() if folder else "Inbox"
+    dir_path = os.path.join(user_root, target_folder)
+    os.makedirs(dir_path, exist_ok=True)
+    full_path = os.path.join(dir_path, save_name)
+    with open(full_path, "w", encoding="utf-8") as f:
+        f.write(f"---\ntitle: {clean_name}\ntype: upload\n---\n\n{md}")
+
+    job_id = str(uuid.uuid4())
+    job = {
+        "job_id": job_id,
+        "user_id": username,
+        "content": f"上传文件: {clean_name}\n{md[:500]}...",
+        "received_at": now_iso(),
+        "source": "upload",
+        "process_mode": "note",
+        "folder": folder,
+    }
+    write_inbox_job(job)
+    return {"status": "accepted", "job_id": job_id, "path": full_path}
+
+@app.post("/api/rebuild_vectors")
+async def api_rebuild_vectors(authorization: str = Header(None)):
+    username = require_user(authorization)
+    user_root = resolve_user_root(username)
+    count = rebuild_user_vectors(user_root, username)
+    return {"status": "success", "chunks": count}
+
+@app.post("/api/daily_summary")
+async def api_daily_summary(authorization: str = Header(None)):
+    username = require_user(authorization)
+    user_root = resolve_user_root(username)
+    path, msg = generate_daily_summary(user_root, username)
+    if not path:
+        raise HTTPException(status_code=400, detail=msg)
+    return {"status": "success", "path": path, "mode": msg}
+
+@app.get("/api/daily_list")
+async def api_daily_list(offset: int = 0, authorization: str = Header(None)):
+    username = require_user(authorization)
+    user_root = resolve_user_root(username)
+    content = build_daily_list(user_root, username, offset)
+    return {"content": content}
+
+@app.post("/api/chat")
+async def api_chat(payload: dict, authorization: str = Header(None)):
+    username = require_user(authorization)
+    query = (payload.get("query") or "").strip()
+    if not query:
+        raise HTTPException(status_code=400, detail="Empty query")
+
+    hits = hybrid_search(query, top_k=8, user_id=username)
+    docs = [h.get("content", "") for h in hits if h.get("content")]
+    context_str = "\n\n".join([f"【来源{i+1}】: {d}" for i, d in enumerate(docs[:6])])
+
+    if not context_str:
+        # 无命中则走通用对话
+        answer = llm_chat(query)
+        return {"answer": answer}
+
+    # 纠偏式回答
+    draft = llm_chat(query)
+    correction_prompt = (
+        "你是一个审校助手。请依据【知识库片段】对【初稿回答】进行纠偏：\n"
+        "1) 如果初稿与知识库冲突，必须修正。\n"
+        "2) 如果初稿有缺失且知识库有信息，请补充。\n"
+        "3) 不要添加知识库之外的新事实。\n"
+        "4) 输出最终答案，保持回答详细。\n"
+        f"\n【初稿回答】:\n{draft}\n"
+        f"\n【知识库片段】:\n{context_str}\n"
+    )
+    answer = llm_chat(query, system_prompt=correction_prompt)
+    return {"answer": answer}
+
+
 
 # ✨ 新增：状态查询接口
 @app.get("/api/status/{job_id}")
@@ -163,9 +410,11 @@ async def check_job_status(job_id: str):
     return get_job_latest_status(job_id)
 
 @app.post("/prune")
-async def api_prune_db():
+async def api_prune_db(authorization: str = Header(None)):
     try:
-        return sync_prune_vectors()
+        username = require_user(authorization)
+        user_root = resolve_user_root(username)
+        return sync_prune_vectors(user_root)
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
@@ -232,6 +481,7 @@ async def inbox_worker_loop():
                 
                 # 2. ✅ 现在可以安全获取 mode 了
                 mode = job.get("process_mode", "auto")
+                folder = job.get("folder")
 
                 # 3. 执行业务
                 append_job_event(job["job_id"], "RUNNING", step="worker_pick")
@@ -240,7 +490,8 @@ async def inbox_worker_loop():
                     job["job_id"], 
                     job["content"], 
                     job["user_id"],
-                    mode=mode
+                    mode=mode,
+                    folder=folder
                 )
                 
                 mark_inbox_done(job_path)
@@ -252,6 +503,7 @@ async def inbox_worker_loop():
 
 @app.on_event("startup")
 async def startup():
+    init_auth_db()
     asyncio.create_task(inbox_worker_loop())
 
 if __name__ == "__main__":

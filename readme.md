@@ -1,6 +1,6 @@
 # 🧠 Knowledge OS (璇玑枢)
 
-**Knowledge OS** 是一个基于本地大模型（Local LLM）的个人知识库自动化管理系统。它集成了多渠道信息采集、AI 智能总结、Obsidian 知识库双向同步以及 RAG（检索增强生成）对话功能。
+**Knowledge OS** 是一个基于本地大模型（Local LLM）的个人知识库自动化管理系统。它集成了多渠道信息采集、AI 智能总结、Obsidian/多账号知识库同步以及 RAG（检索增强生成）对话功能。
 
 该项目坚持 **"Local First"** 原则，核心数据与模型计算全部在本地 GPU 服务器上完成，确保数据隐私与安全。
 
@@ -10,25 +10,27 @@
 
 * **微信集成**：通过企业微信应用接口 + Cloudflare Tunnel 穿透，实现微信端直接转发文章链接入库。
 * **多平台解析**：集成 `Trafilatura` 和 `Jina Reader`，支持知乎、小红书、微信公众号等主流平台正文提取。
-* **Web 速记**：支持在网页端直接粘贴 URL 或记录灵感笔记。
+* **Web 速记**：支持登录后直接粘贴 URL 或记录灵感笔记，多账号隔离。
 * **文件投喂**：支持上传 PDF、Word、PPT 等文档，自动解析并转为 Markdown 入库。
 
 ### 2. AI 智能处理 (AI Processing)
 
 * **本地大模型**：调用本地部署的 **Qwen2.5-14b-Instruct** 模型，对采集的内容进行自动总结、打标签和元数据生成。
-* **语义向量化**：使用 **BGE-M3** 模型对长文本进行语义分块（Chunking）和向量化（Embedding）。
+* **纠偏式对话**：先自由回答，再依据知识库片段纠偏，避免“只依赖库或只依赖模型”。
+* **语义向量化**：使用 **BGE-M3** 模型对长文本进行语义分块（Chunking）和向量化（Embedding），包含 AI 摘要/分析。
 
 ### 3. 双模存储架构 (Dual Storage)
 
-* **文件层 (The Brain)**：所有内容以 Markdown 格式保存在本地 **Obsidian** 仓库中，所见即所得，方便二次编辑。
+* **文件层 (The Brain)**：内容以 Markdown 格式保存在本地 **Obsidian** 或多账号独立目录中，所见即所得，方便二次编辑。
 * **向量层 (The Hippocampus)**：切片后的向量数据存入 **ChromaDB**，用于支撑语义检索。
 
 ### 4. 交互式 Web 终端 (Streamlit UI)
 
 * **知识阅览室**：可视化文件树（无限层级），支持按文件夹浏览、关键词搜索、阅读模式与编辑模式切换。
-* **RAG 对话**：基于本地知识库的问答系统，支持多轮对话，回答附带原文引用来源（Source Attribution）。
+* **RAG 对话**：基于本地知识库的问答系统，支持多轮对话与纠偏模式，回答附带原文引用来源（Source Attribution）。
 * **数据治理**：提供“向量库同步”功能，自动检测并清理已删除文件的无效索引，消除幻觉。
 * **系统监控**：可视化查看后端运行日志与任务队列状态。
+* **日报总结**：支持一键生成“今日总结”，按用户、按天聚合所有内容。
 
 ---
 
@@ -67,6 +69,7 @@ graph TD
 
 * **Language**: Python 3.11+
 * **Web Framework**: Streamlit (Frontend), FastAPI (Backend)
+* **Auth**: SQLite + JWT
 * **Vector Database**: ChromaDB
 * **LLM Inference**: LM Studio (Local Server)
 * **Models**:
@@ -112,22 +115,28 @@ sudo apt-get install -y ffmpeg libsm6 libxext6  # 处理图片/视频可能需�
 
 ### 2. 配置文件 (`config.py`)
 
-请复制 `config_sample.py` 为 `config.py` 并填入以下信息：
+请直接编辑 `config.py` 并填入以下信息：
 
 ```python
 # 路径配置
 OBSIDIAN_ROOT = "/path/to/your/obsidian/vault"
-CHROMA_PATH = "./chroma_db"
+KNOWLEDGE_STORE_ROOT = "/path/to/your/knowledge_store"
+CHROMA_DB_PATH = "./chroma_db"
 
 # LLM 配置
-LLM_API_URL = "http://localhost:1234/v1"
+LLM_API_URL = "http://localhost:1234/v1/chat/completions"
 LLM_MODEL = "qwen2.5-14b-instruct"
+EMBEDDING_API_URL = "http://localhost:1234/v1"
+EMBEDDING_MODEL_NAME = "text-embedding-bge-m3"
 
 # 微信/鉴权配置
 TOKEN = "your_wechat_token"
 ENCODING_AES_KEY = "your_aes_key"
 CORP_ID = "your_corp_id"
 API_SECRET_KEY = "your_custom_secret_key"
+
+# Auth
+JWT_SECRET = "your_jwt_secret"
 
 ```
 
@@ -164,7 +173,9 @@ knowledge_agent/
 ├── utils/
 │   ├── inbox.py          # 任务队列管理
 │   ├── logger.py         # 日志记录模块
-│   └── vector.py         # 向量库操作封装
+│   ├── auth.py           # 用户与鉴权
+│   ├── rebuild.py        # 向量重建
+│   └── daily_summary.py  # 今日总结生成
 ├── web_ui.py             # Streamlit 前端界面代码
 ├── main.py               # FastAPI 后端入口 & Worker
 ├── config.py             # 配置文件
@@ -187,3 +198,19 @@ knowledge_agent/
 
 ---
 
+## ✅ 2025-12-23 日改动记录
+
+* 新增 Web 端账号系统：SQLite 存储用户 + JWT 登录/注册/重置密码。
+* 多账号数据隔离：`scouthe` 账号继续写入 Obsidian，其它账号写入 `/home/heheheh/Documents/knowledge_store/<user>`。
+* 分类体系：支持创建分类目录，保存时可选分类并落到 `分类/Notes` 或 `分类/Articles`。
+* 入库追踪：向量库与 frontmatter 写入 `user_id` / `folder` 等字段，检索与统计更准确。
+* 权限隔离：检索与清理操作按 `user_id` 过滤，避免跨账号访问。
+* RAG 稳定性：混合检索支持按用户过滤，新增“精确模式”开关及标题重排。
+* 性能优化：`fetch_all_metadatas` 增加缓存与按用户过滤，减少全量扫描开销。
+* UI 体验：新增昨日/前天快捷键，分组输出“分类 → 笔记/网页”。
+* 登录持久化：刷新页面通过 URL query 恢复会话，减少频繁登录。
+* AI 分析入向量库：摘要/分析内容纳入向量化，提高语义召回。
+* 向量重建：新增“重新向量化(当前用户)”按钮和脚本，支持全量重建。
+* 今日总结：按数据库当日内容生成 Daily Log，并可在对话框展示。
+* 对话纠偏：自由回答后用知识库片段纠偏，减少“仅依赖库”的问题。
+* 精确模式入口：在侧边栏提供可用开关，而非待办。

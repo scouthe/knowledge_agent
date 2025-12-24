@@ -6,11 +6,11 @@ from utils.logger import append_job_event
 from utils.helpers import url_hash
 from core.crawler import fetch_via_trafilatura, fetch_via_jina
 from core.llm import call_llm_analysis
-from core.storage import save_to_obsidian, save_to_vector_db
+from core.storage import save_to_obsidian, save_to_vector_db, resolve_user_root
 from core.wechat import send_wecom_msg
 from core.index import save_to_keyword_index
 
-async def process_content_to_obsidian(job_id: str, content: str, user_id: str, mode: str = "auto"):
+async def process_content_to_obsidian(job_id: str, content: str, user_id: str, mode: str = "auto", folder: str | None = None):
     t0 = time.time()
     append_job_event(job_id, "RUNNING", step="start", user_id=user_id)
     
@@ -58,6 +58,9 @@ async def process_content_to_obsidian(job_id: str, content: str, user_id: str, m
         if payload.get("type") != "error":
             payload["doc_id"] = url_hash(target_url)
             payload["created_at"] = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+            payload["user_id"] = user_id
+            if folder:
+                payload["folder"] = folder
             
     else:
         # 个人笔记 (当 mode="note" 时，或者 mode="crawl" 但真的没输链接时走进这里)
@@ -67,8 +70,11 @@ async def process_content_to_obsidian(job_id: str, content: str, user_id: str, m
             "content": content,
             "title": f"随手记_{content[:10].replace(chr(10), ' ')}",
             "doc_id": hashlib.md5(content.encode()).hexdigest(),
-            "created_at": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+            "created_at": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
+            "user_id": user_id
         }
+        if folder:
+            payload["folder"] = folder
 
     # 错误熔断
     if payload.get("type") == "error":
@@ -88,7 +94,8 @@ async def process_content_to_obsidian(job_id: str, content: str, user_id: str, m
     # === 3. 保存 (双写模式) ===
     try:
         # A. 存文件 (Truth)
-        path, doc_id = save_to_obsidian(payload, ai_res)
+        user_root = resolve_user_root(user_id)
+        path, doc_id = save_to_obsidian(payload, ai_res, user_root, payload.get("folder"))
         save_to_keyword_index(payload, ai_res)
         
         # B. 存向量 (Brain)

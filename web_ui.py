@@ -15,6 +15,8 @@ from config import (
     LLM_API_URL,
     LLM_MODEL,
     OBSIDIAN_ROOT,
+    KNOWLEDGE_STORE_ROOT,
+    SPECIAL_USER,
     EMBEDDING_MODEL_NAME,
     EMBEDDING_API_URL,
     JOBS_LOG_PATH       # 确保 config.py 里有 JOBS_LOG_PATH = "logs/jobs.jsonl"
@@ -45,6 +47,37 @@ def get_vector_store():
         return None
 
 collection = get_vector_store()
+
+def get_user_root(username: str) -> str:
+    if username == SPECIAL_USER:
+        root = OBSIDIAN_ROOT
+    else:
+        root = os.path.join(KNOWLEDGE_STORE_ROOT, username)
+    os.makedirs(root, exist_ok=True)
+    return root
+
+def auth_headers() -> dict:
+    token = st.session_state.get("auth_token")
+    return {"Authorization": f"Bearer {token}"} if token else {}
+
+def _get_query_params() -> dict:
+    try:
+        params = dict(st.query_params)
+    except Exception:
+        params = st.experimental_get_query_params()
+    return params
+
+def _set_query_params(**kwargs):
+    try:
+        st.query_params.update(kwargs)
+    except Exception:
+        st.experimental_set_query_params(**kwargs)
+
+def _clear_query_params():
+    try:
+        st.query_params.clear()
+    except Exception:
+        st.experimental_set_query_params()
 
 # === 4. 核心逻辑函数 (保留原版高级逻辑) ===
 
@@ -79,7 +112,8 @@ def check_is_list_request(query):
     triggers = ["有哪些", "有什么", "列一下", "列出", "清单", "多少篇", "list"]
     return any(t in query for t in triggers) and ("文章" in query or "笔记" in query)
 
-def fetch_all_metadatas(batch_size=500):
+@st.cache_data(ttl=30)
+def fetch_all_metadatas(batch_size=500, user_root: str | None = None):
     """分页拉取全部元数据，避免 limit 限制"""
     if not collection:
         return []
@@ -90,7 +124,13 @@ def fetch_all_metadatas(batch_size=500):
         metadatas = results.get("metadatas") or []
         if not metadatas:
             break
-        all_meta.extend(metadatas)
+        if user_root:
+            for meta in metadatas:
+                path = meta.get("file_path", "")
+                if path and path.startswith(user_root):
+                    all_meta.append(meta)
+        else:
+            all_meta.extend(metadatas)
         if len(metadatas) < batch_size:
             break
         offset += batch_size
@@ -116,11 +156,44 @@ def resolve_hybrid_hit(hit):
         pass
     return doc_id, doc_text, meta
 
+def _title_overlap_score(query: str, title: str) -> int:
+    if not query or not title:
+        return 0
+    q = set([c for c in query if not c.isspace()])
+    t = set([c for c in title if not c.isspace()])
+    return len(q & t)
+
+def rerank_by_title(query: str, documents: list, metadatas: list) -> tuple[list, list]:
+    scored = []
+    for i, doc in enumerate(documents):
+        meta = metadatas[i] if i < len(metadatas) else {}
+        title = meta.get("title", "")
+        score = _title_overlap_score(query, title)
+        scored.append((score, i, doc, meta))
+    scored.sort(key=lambda x: (x[0], -x[1]), reverse=True)
+    filtered = [item for item in scored if item[0] > 0]
+    use = filtered if filtered else scored
+    new_docs = [item[2] for item in use]
+    new_meta = [item[3] for item in use]
+    return new_docs, new_meta
+
+def list_custom_categories(user_root: str) -> list[str]:
+    defaults = {"Notes", "Articles", "Inbox", ".obsidian"}
+    categories = []
+    if not os.path.exists(user_root):
+        return categories
+    for name in os.listdir(user_root):
+        path = os.path.join(user_root, name)
+        if os.path.isdir(path) and name not in defaults and not name.startswith("."):
+            categories.append(name)
+    categories.sort()
+    return categories
+
 def get_article_list(filter_today=False):
     """获取文章列表字符串"""
     if not collection: return "数据库未连接"
     try:
-        metadatas = fetch_all_metadatas()
+        metadatas = fetch_all_metadatas(user_root=USER_ROOT)
         today_str = time.strftime("%Y-%m-%d")
         unique_titles = set()
         
@@ -141,6 +214,44 @@ def get_article_list(filter_today=False):
     except Exception as e:
         return f"查询出错: {e}"
 
+def get_list_by_day(offset_days: int):
+    """按日期分组输出：分类 -> 笔记/网页"""
+    if not collection:
+        return "数据库未连接"
+    try:
+        target_date = (datetime.date.today() - datetime.timedelta(days=offset_days)).strftime("%Y-%m-%d")
+        metadatas = fetch_all_metadatas(user_root=USER_ROOT)
+        grouped = {}
+        for meta in metadatas:
+            created_at = meta.get("created_at", "")
+            if target_date not in created_at:
+                continue
+            path = meta.get("file_path", "")
+            rel = os.path.relpath(path, USER_ROOT) if path else ""
+            folder = rel.split(os.sep)[0] if rel else "默认"
+            category = folder if folder not in ("Notes", "Articles", "Inbox") else "默认"
+            item_type = "笔记" if meta.get("category") == "个人笔记" else "网页"
+            title = meta.get("title", "无标题")
+            grouped.setdefault(category, {}).setdefault(item_type, set()).add(title)
+
+        if not grouped:
+            return f"📭 {target_date} 暂无内容。"
+
+        lines = [f"📅 **{target_date}**"]
+        for category in sorted(grouped.keys()):
+            lines.append("")
+            lines.append(f"**分类：{category}**")
+            for item_type in ("笔记", "网页"):
+                titles = sorted(grouped[category].get(item_type, []))
+                if not titles:
+                    continue
+                lines.append(f"\n**{item_type}（{len(titles)}）**")
+                for i, title in enumerate(titles, 1):
+                    lines.append(f"- 《{title}》")
+        return "\n".join(lines)
+    except Exception as e:
+        return f"查询出错: {e}"
+
 # === 5. Session State 初始化 ===
 if "messages" not in st.session_state:
     st.session_state.messages = []
@@ -148,9 +259,73 @@ if "history_doc_ids" not in st.session_state:
     st.session_state.history_doc_ids = []
 if "last_topic" not in st.session_state:
     st.session_state.last_topic = ""
+if "auth_token" not in st.session_state:
+    st.session_state.auth_token = None
+if "auth_user" not in st.session_state:
+    st.session_state.auth_user = None
+
+if not st.session_state.auth_token:
+    params = _get_query_params()
+    token = params.get("token")
+    user = params.get("user")
+    if isinstance(token, list):
+        token = token[0]
+    if isinstance(user, list):
+        user = user[0]
+    if token and user:
+        st.session_state.auth_token = token
+        st.session_state.auth_user = user
+
+if not st.session_state.auth_token:
+    st.title("🔐 登录")
+    tab_login, tab_reset = st.tabs(["登录", "重置密码"])
+    with tab_login:
+        username = st.text_input("用户名", key="login_user")
+        password = st.text_input("密码", type="password", key="login_pass")
+        if st.button("登录"):
+            try:
+                resp = httpx.post(
+                    "http://localhost:8888/auth/login",
+                    json={"username": username, "password": password},
+                    timeout=10,
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    st.session_state.auth_token = data.get("token")
+                    st.session_state.auth_user = data.get("username")
+                    _set_query_params(token=st.session_state.auth_token, user=st.session_state.auth_user)
+                    st.rerun()
+                else:
+                    st.error(resp.json().get("detail", "登录失败"))
+            except Exception as e:
+                st.error(f"登录失败: {e}")
+    with tab_reset:
+        username = st.text_input("用户名", key="reset_user")
+        old_password = st.text_input("旧密码", type="password", key="reset_old")
+        new_password = st.text_input("新密码", type="password", key="reset_new")
+        if st.button("重置密码"):
+            try:
+                resp = httpx.post(
+                    "http://localhost:8888/auth/reset",
+                    json={"username": username, "old_password": old_password, "new_password": new_password},
+                    timeout=10,
+                )
+                if resp.status_code == 200:
+                    st.success("密码已重置，请重新登录")
+                else:
+                    st.error(resp.json().get("detail", "重置失败"))
+            except Exception as e:
+                st.error(f"重置失败: {e}")
+    st.stop()
+
+AUTH_USER = st.session_state.auth_user
+USER_ROOT = get_user_root(AUTH_USER)
 
 # === 6. 页面路由 ===
-page_mode = st.sidebar.radio("模式选择", ["对话/阅读", "🖥️ 系统日志"])
+page_options = ["对话/阅读", "🖥️ 系统日志"]
+if st.session_state.get("auth_user") == SPECIAL_USER:
+    page_options.append("🛠️ 用户管理")
+page_mode = st.sidebar.radio("模式选择", page_options)
 
 # --- 页面 A: 系统日志 ---
 if page_mode == "🖥️ 系统日志":
@@ -198,10 +373,87 @@ if page_mode == "🖥️ 系统日志":
     
     st.stop() # 停止渲染下面的聊天界面
 
+if page_mode == "🛠️ 用户管理":
+    st.title("🛠️ 用户管理")
+    try:
+        res = httpx.get("http://localhost:8888/admin/users", headers=auth_headers(), timeout=5)
+        users = res.json().get("users", []) if res.status_code == 200 else []
+    except Exception:
+        users = []
+    if users:
+        st.subheader("用户列表")
+        for u in users:
+            st.text(f"{u['username']} ({u['created_at']})")
+
+    st.divider()
+    st.subheader("新增用户")
+    admin_new_user = st.text_input("用户名", key="admin_new_user_page")
+    admin_new_pass = st.text_input("密码", type="password", key="admin_new_pass_page")
+    if st.button("➕ 创建用户", use_container_width=True):
+        try:
+            resp = httpx.post(
+                "http://localhost:8888/admin/users",
+                headers=auth_headers(),
+                json={"username": admin_new_user, "password": admin_new_pass},
+                timeout=5,
+            )
+            if resp.status_code == 200:
+                st.success("已创建")
+                st.rerun()
+            else:
+                st.error(resp.json().get("detail", "创建失败"))
+        except Exception as e:
+            st.error(f"创建失败: {e}")
+
+    st.divider()
+    st.subheader("重置密码")
+    admin_reset_user = st.text_input("用户名", key="admin_reset_user_page")
+    admin_reset_pass = st.text_input("新密码", type="password", key="admin_reset_pass_page")
+    if st.button("🔐 重置密码", use_container_width=True):
+        try:
+            resp = httpx.post(
+                "http://localhost:8888/admin/users/reset",
+                headers=auth_headers(),
+                json={"username": admin_reset_user, "new_password": admin_reset_pass},
+                timeout=5,
+            )
+            if resp.status_code == 200:
+                st.success("已重置")
+            else:
+                st.error(resp.json().get("detail", "重置失败"))
+        except Exception as e:
+            st.error(f"重置失败: {e}")
+
+    st.divider()
+    st.subheader("删除用户")
+    admin_del_user = st.text_input("用户名", key="admin_del_user_page")
+    if st.button("🗑️ 删除用户", use_container_width=True):
+        try:
+            resp = httpx.delete(
+                f"http://localhost:8888/admin/users/{admin_del_user}",
+                headers=auth_headers(),
+                timeout=5,
+            )
+            if resp.status_code == 200:
+                st.success("已删除")
+                st.rerun()
+            else:
+                st.error(resp.json().get("detail", "删除失败"))
+        except Exception as e:
+            st.error(f"删除失败: {e}")
+
+    st.stop()
+
 # --- 页面 B: 对话/阅读 (主界面) ---
 
 # === 侧边栏 UI ===
 with st.sidebar:
+    st.caption(f"用户: {AUTH_USER}")
+    if st.button("退出登录", use_container_width=True):
+        st.session_state.auth_token = None
+        st.session_state.auth_user = None
+        _clear_query_params()
+        st.rerun()
     # 1. 开发计划 (保留原版)
     with st.expander("📌 开发计划 (TODO List)", expanded=False):
             st.markdown("#### 🔌 数据源 & 格式")
@@ -216,13 +468,15 @@ with st.sidebar:
             st.checkbox("Rerank 重排序：引入 Cross-Encoder 提升 Top-K 准确率", value=False)
             st.checkbox("🔪 语义切片：基于 Markdown 标题结构的智能分块 (非暴力截断)", value=False)
             st.checkbox("🕸️ Graph RAG：利用 Obsidian 双链 `[[Link]]` 增强检索上下文", value=False)
+            st.checkbox("🎯 精确模式 (降低噪声)", value=False, key="precise_mode_todo", disabled=True)
     
     st.divider()
     st.title("🧠 Knowledge OS")
+    st.toggle("🎯 精确模式 (降低噪声)", value=False, key="precise_mode")
     
     # 2. 快捷指令区
     st.subheader("⚡ 快捷指令")
-    c1, c2, c3 = st.columns(3)
+    c1, c2, c3, c4, c5 = st.columns(5)
     with c1:
         if st.button("🗑️ 重开", use_container_width=True):
             st.session_state.messages = []
@@ -233,30 +487,85 @@ with st.sidebar:
     with c2:
         if st.button("📅 今日", use_container_width=True):
             st.session_state.messages.append({"role": "user", "content": "列出今日文章"})
-            st.session_state.messages.append({"role": "assistant", "content": get_article_list(True)})
+            st.session_state.messages.append({"role": "assistant", "content": get_list_by_day(0)})
             st.rerun()
     with c3:
+        if st.button("🗓️ 昨天", use_container_width=True):
+            st.session_state.messages.append({"role": "user", "content": "列出昨天文章"})
+            st.session_state.messages.append({"role": "assistant", "content": get_list_by_day(1)})
+            st.rerun()
+    with c4:
+        if st.button("🗓️ 前天", use_container_width=True):
+            st.session_state.messages.append({"role": "user", "content": "列出前天文章"})
+            st.session_state.messages.append({"role": "assistant", "content": get_list_by_day(2)})
+            st.rerun()
+    with c5:
         if st.button("🧹 整理", use_container_width=True):
             with st.spinner("清理中..."):
                 try:
-                    res = httpx.post("http://localhost:8888/prune", timeout=30)
+                    res = httpx.post("http://localhost:8888/prune", headers=auth_headers(), timeout=30)
                     st.toast(f"清理: {res.json().get('deleted_chunks', 0)} 条")
                 except: st.error("后端未连接")
+    if st.button("🔁 重新向量化(当前用户)", use_container_width=True):
+        with st.spinner("重建中..."):
+            try:
+                res = httpx.post("http://localhost:8888/api/rebuild_vectors", headers=auth_headers(), timeout=300)
+                if res.status_code == 200:
+                    st.success(f"完成，写入切片: {res.json().get('chunks', 0)}")
+                else:
+                    st.error(res.json().get("detail", "重建失败"))
+            except Exception as e:
+                st.error(f"重建失败: {e}")
+    if st.button("📝 生成今日总结", use_container_width=True):
+        today_str = time.strftime("%Y-%m-%d")
+        ym = today_str[:7]
+        summary_path = os.path.join(USER_ROOT, "Daily_Log", ym, f"{today_str}_今日总结.md")
+        with st.spinner("检测中..."):
+            try:
+                res = httpx.post("http://localhost:8888/api/daily_summary", headers=auth_headers(), timeout=300)
+                if res.status_code == 200:
+                    mode = res.json().get("mode")
+                    path = res.json().get("path")
+                    if mode == "updated":
+                        st.info("检测到新文件，重新生成总结中...")
+                    content = ""
+                    if path and os.path.exists(path):
+                        with open(path, "r", encoding="utf-8") as f:
+                            content = f.read()
+                    action = "生成今日总结" if mode == "updated" else "查看今日总结"
+                    st.session_state.messages.append({"role": "user", "content": action})
+                    st.session_state.messages.append({"role": "assistant", "content": content or f"已生成: {path}"})
+                    st.rerun()
+                else:
+                    st.error(res.json().get("detail", "生成失败"))
+            except Exception as e:
+                st.error(f"生成失败: {e}")
 
     # 3. ✨ 速记/存链接 (已集成新版轮询逻辑) ✨
     with st.expander("📥 速记 / 存链接", expanded=True):
+        categories = list_custom_categories(USER_ROOT)
         with st.form("ingest_form", clear_on_submit=True):
             note_content = st.text_area("内容", placeholder="输入笔记或URL...", height=120, label_visibility="collapsed")
             b1, b2 = st.columns(2)
             with b1: sub_note = st.form_submit_button("📝 仅存笔记", use_container_width=True)
             with b2: sub_url = st.form_submit_button("🌐 抓取网页", use_container_width=True)
+            st.divider()
+            st.caption("分类保存")
+            c1, c2 = st.columns([2, 1])
+            with c1:
+                selected_category = st.selectbox("选择分类", ["(默认)"] + categories, label_visibility="collapsed")
+            with c2:
+                category_mode = st.selectbox("类型", ["笔记", "网页"], label_visibility="collapsed")
+            custom_category = st.text_input("新分类（可选）", label_visibility="collapsed", placeholder="输入新分类名")
+            sub_category = st.form_submit_button("📁 保存到分类", use_container_width=True)
             
             if (sub_note or sub_url) and note_content.strip():
                 mode = "note" if sub_note else "crawl"
                 try:
                     # 发送请求
                     resp = httpx.post("http://localhost:8888/ingest", 
-                                      json={"user_id": "web", "content": note_content, "mode": mode}, 
+                                      json={"content": note_content, "mode": mode}, 
+                                      headers=auth_headers(),
                                       timeout=5)
                     
                     if resp.status_code == 200:
@@ -325,6 +634,82 @@ with st.sidebar:
                                 status_box.update(label="⚠️ 后台运行中 (请稍后在阅览室查看)", state="running")
                 except Exception as e:
                     st.error(f"连接失败: {e}")
+            elif sub_category and note_content.strip():
+                category_name = custom_category.strip() or ("" if selected_category == "(默认)" else selected_category)
+                if not category_name:
+                    st.warning("请选择或输入一个分类")
+                else:
+                    mode = "note" if category_mode == "笔记" else "crawl"
+                    subfolder = "Notes" if category_mode == "笔记" else "Articles"
+                    folder = os.path.join(category_name, subfolder)
+                    if custom_category.strip():
+                        try:
+                            httpx.post(
+                                "http://localhost:8888/api/category",
+                                json={"name": category_name},
+                                headers=auth_headers(),
+                                timeout=5,
+                            )
+                        except Exception:
+                            pass
+                    try:
+                        resp = httpx.post(
+                            "http://localhost:8888/ingest",
+                            json={"content": note_content, "mode": mode, "folder": folder},
+                            headers=auth_headers(),
+                            timeout=5,
+                        )
+                        if resp.status_code == 200:
+                            job_id = resp.json().get("job_id")
+                            with st.status("🚀 任务提交成功，处理中...", expanded=True) as status_box:
+                                st.write(f"Job ID: `{job_id}`")
+                                last_step_seen = None
+                                for _ in range(40):
+                                    time.sleep(1.5)
+                                    info = {}
+                                    status = "UNKNOWN"
+                                    step = ""
+                                    try:
+                                        r_stat = httpx.get(f"http://localhost:8888/api/status/{job_id}", timeout=3)
+                                        if r_stat.status_code == 200:
+                                            info = r_stat.json()
+                                            status = info.get("status")
+                                            step = info.get("step")
+                                    except Exception:
+                                        pass
+
+                                    if step and step != last_step_seen:
+                                        step_map = {
+                                            "worker_pick": "工人接单",
+                                            "crawl_local": "本地爬虫抓取",
+                                            "crawl_jina": "云端 Jina 解析",
+                                            "save_vector_start": "开始向量化",
+                                            "save_vector_success": "向量化完成",
+                                            "done": "全部完成"
+                                        }
+                                        display_step = step_map.get(step, step)
+                                        st.write(f"🔄 {display_step}...")
+                                        last_step_seen = step
+
+                                    if status and "SUCCESS" in status:
+                                        status_box.update(label="✅ 处理完成！", state="complete", expanded=False)
+                                        if status == "SUCCESS_NOTIFY_FAIL":
+                                            st.warning(f"入库成功，但微信通知失败: {info.get('message')}")
+                                        else:
+                                            st.success(f"成功: {info.get('message')}")
+                                        time.sleep(1)
+                                        st.rerun()
+                                    elif status and "FAIL" in status:
+                                        status_box.update(label="❌ 失败", state="error")
+                                        st.error(info.get("error"))
+                                        break
+                                else:
+                                    status_box.update(label="⚠️ 后台运行中 (请稍后在阅览室查看)", state="running")
+                        else:
+                            st.error(resp.json().get("detail", "提交失败"))
+                    except Exception as e:
+                        st.error(f"连接失败: {e}")
+
 
     # 4. 文件投喂 (MarkItDown)
     with st.expander("📂 投喂文档 (PDF/Office)", expanded=False):
@@ -341,15 +726,18 @@ with st.sidebar:
                     md = MarkItDown().convert(tmp_path).text_content
                     clean_name = uploaded_file.name.rsplit('.', 1)[0]
                     save_name = f"{time.strftime('%Y%m%d_%H%M%S')}_{clean_name}.md"
-                    inbox_path = os.path.join(OBSIDIAN_ROOT, "Inbox")
+                    inbox_path = os.path.join(USER_ROOT, "Inbox")
                     if not os.path.exists(inbox_path): os.makedirs(inbox_path)
                     
                     with open(os.path.join(inbox_path, save_name), "w", encoding="utf-8") as f:
                         f.write(f"---\ntitle: {clean_name}\ntype: upload\n---\n\n{md}")
                     
                     # 触发后端
-                    httpx.post("http://localhost:8888/ingest", 
-                               json={"user_id": "upload", "content": f"上传文件: {clean_name}\n{md[:500]}...", "mode": "note"})
+                    httpx.post(
+                        "http://localhost:8888/ingest",
+                        json={"content": f"上传文件: {clean_name}\n{md[:500]}...", "mode": "note"},
+                        headers=auth_headers(),
+                    )
                     st.success(f"✅ 已存入 Inbox")
                     os.remove(tmp_path)
                 except Exception as e:
@@ -362,8 +750,8 @@ with st.sidebar:
     
     # 扫描文件
     all_files = []
-    if os.path.exists(OBSIDIAN_ROOT):
-        for root, dirs, files in os.walk(OBSIDIAN_ROOT):
+    if os.path.exists(USER_ROOT):
+        for root, dirs, files in os.walk(USER_ROOT):
             dirs[:] = [d for d in dirs if not d.startswith('.')]
             for name in files:
                 if name.endswith('.md'):
@@ -371,7 +759,7 @@ with st.sidebar:
                     all_files.append({
                         "name": name.replace(".md", ""),
                         "path": path,
-                        "rel_path": os.path.relpath(path, OBSIDIAN_ROOT),
+                        "rel_path": os.path.relpath(path, USER_ROOT),
                         "mtime": os.path.getmtime(path)
                     })
     
@@ -490,7 +878,6 @@ else:
                     full_response = "❌ 向量库未连接，无法检索。"
                     placeholder.error(full_response)
                     st.session_state.messages.append({"role": "assistant", "content": full_response})
-                    continue
                 
                 # (1) 意图判断 (追问模式)
                 is_anchored = False
@@ -511,16 +898,25 @@ else:
                     context_parts = []
                     seen_parent_ids = set()
 
+                    precise_mode = st.session_state.get("precise_mode", False)
+                    if precise_mode and st.session_state.history_doc_ids:
+                        is_anchored = True
+
                     if is_anchored and st.session_state.history_doc_ids:
                         results = collection.query(
                             query_texts=[user_input],
                             n_results=10,
-                            where={"parent_id": {"$in": st.session_state.history_doc_ids}}
+                            where={"parent_id": {"$in": st.session_state.history_doc_ids}, "user_id": AUTH_USER}
                         )
-                        documents = results.get("documents", [[]])[0]
-                        metadatas = results.get("metadatas", [[]])[0]
-                        for i, doc in enumerate(documents):
-                            meta = metadatas[i] if i < len(metadatas) else {}
+                        raw_docs = results.get("documents", [[]])[0]
+                        raw_metas = results.get("metadatas", [[]])[0]
+                        for i, doc in enumerate(raw_docs):
+                            meta = raw_metas[i] if i < len(raw_metas) else {}
+                            path = meta.get("file_path", "")
+                            if not path or not path.startswith(USER_ROOT):
+                                continue
+                            documents.append(doc)
+                            metadatas.append(meta)
                             parent_id = meta.get("parent_id")
                             if parent_id:
                                 current_ids.append(parent_id)
@@ -530,10 +926,13 @@ else:
                             is_anchored = False
 
                     if not is_anchored:
-                        hits = hybrid_search(user_input, top_k=10)
+                        hits = hybrid_search(user_input, top_k=10, user_id=AUTH_USER)
                         for i, hit in enumerate(hits):
                             doc_id, doc_text, meta = resolve_hybrid_hit(hit)
                             if not doc_text:
+                                continue
+                            path = (meta or {}).get("file_path", "")
+                            if not path or not path.startswith(USER_ROOT):
                                 continue
                             parent_id = doc_id.split("_")[0] if "_" in doc_id else doc_id
                             if parent_id in seen_parent_ids:
@@ -545,31 +944,69 @@ else:
                                 current_ids.append(parent_id)
                             context_parts.append(f"【来源{i+1}】: {doc_text}")
 
+                    if precise_mode and documents:
+                        documents, metadatas = rerank_by_title(user_input, documents, metadatas)
+
                     if not documents:
-                        full_response = "🤔 知识库里没有找到相关内容。"
+                        # 无知识库命中时，直接用通用模型回答
+                        payload = {
+                            "model": LLM_MODEL,
+                            "messages": [
+                                {"role": "system", "content": "你是一个有用的助手。"},
+                                {"role": "user", "content": user_input}
+                            ],
+                            "temperature": 0.7
+                        }
+                        try:
+                            resp = httpx.post(LLM_API_URL, json=payload, timeout=60)
+                            data = resp.json()
+                            full_response = data['choices'][0]['message']['content']
+                        except Exception as e:
+                            full_response = f"❌ LLM 调用失败: {e}"
                     else:
                         # 更新 Session
                         if not is_anchored:
                             st.session_state.history_doc_ids = list(set(current_ids))
                             st.session_state.last_topic = user_input
 
-                        # (3) 调用 LLM
+                        # (3) 纠偏式回答：先自由回答，再用知识库校正
                         context_str = "\n\n".join(context_parts)
-                        sys_prompt = f"你是一个助手。{'用户正在追问，' if is_anchored else ''}请基于已知信息回答。\n\n【已知信息】:\n{context_str}"
-
-                        payload = {
+                        draft_payload = {
                             "model": LLM_MODEL,
                             "messages": [
-                                {"role": "system", "content": sys_prompt},
+                                {"role": "system", "content": "你是一个有用的助手。回答请更详细，至少3段，包含关键背景、现状与影响。"},
                                 {"role": "user", "content": user_input}
                             ],
                             "temperature": 0.7
                         }
-
                         try:
-                            resp = httpx.post(LLM_API_URL, json=payload, timeout=60)
-                            data = resp.json()
-                            full_response = data['choices'][0]['message']['content']
+                            draft_resp = httpx.post(LLM_API_URL, json=draft_payload, timeout=60)
+                            draft_data = draft_resp.json()
+                            draft_answer = draft_data['choices'][0]['message']['content']
+                        except Exception as e:
+                            draft_answer = f"❌ LLM 调用失败: {e}"
+
+                        correction_prompt = (
+                            "你是一个审校助手。请依据【知识库片段】对【初稿回答】进行纠偏：\n"
+                            "1) 如果初稿与知识库冲突，必须修正。\n"
+                            "2) 如果初稿有缺失且知识库有信息，请补充。\n"
+                            "3) 不要添加知识库之外的新事实。\n"
+                            "4) 输出最终答案，保持回答详细，至少3段。\n"
+                            f"\n【初稿回答】:\n{draft_answer}\n"
+                            f"\n【知识库片段】:\n{context_str}\n"
+                        )
+                        revise_payload = {
+                            "model": LLM_MODEL,
+                            "messages": [
+                                {"role": "system", "content": correction_prompt},
+                                {"role": "user", "content": user_input}
+                            ],
+                            "temperature": 0.3
+                        }
+                        try:
+                            revise_resp = httpx.post(LLM_API_URL, json=revise_payload, timeout=60)
+                            revise_data = revise_resp.json()
+                            full_response = revise_data['choices'][0]['message']['content']
                         except Exception as e:
                             full_response = f"❌ LLM 调用失败: {e}"
 

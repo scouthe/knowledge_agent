@@ -5,7 +5,7 @@ import hashlib
 import chromadb
 from chromadb.utils import embedding_functions
 from config import (
-    OBSIDIAN_ROOT, CHROMA_DB_PATH, EMBEDDING_API_URL, EMBEDDING_MODEL_NAME,
+    OBSIDIAN_ROOT, KNOWLEDGE_STORE_ROOT, SPECIAL_USER, CHROMA_DB_PATH, EMBEDDING_API_URL, EMBEDDING_MODEL_NAME,
     CHROMA_COLLECTION_NAME, MIN_CONTENT_LENGTH, CHUNK_SIZE, CHUNK_OVERLAP
 )
 from utils.helpers import sanitize_filename, url_hash
@@ -84,7 +84,15 @@ def format_analysis_to_markdown(analysis_data):
         lines = [str(analysis_data)]
     return "\n".join([f"> {line}" for line in lines if line.strip()])
 
-def save_to_obsidian(raw_data: dict, ai_data: dict):
+def resolve_user_root(user_id: str) -> str:
+    if user_id == SPECIAL_USER:
+        root = OBSIDIAN_ROOT
+    else:
+        root = os.path.join(KNOWLEDGE_STORE_ROOT, user_id)
+    os.makedirs(root, exist_ok=True)
+    return root
+
+def save_to_obsidian(raw_data: dict, ai_data: dict, user_root: str, folder_override: str | None = None):
     # ... (此处保留昨天 save_to_obsidian 的完整代码，无需改动) ...
     # 仅为了节省篇幅，这里略过，请直接复制昨天的逻辑
     # 记得最后 return full_path, doc_id  <-- 稍微改一下返回值，方便 pipeline 用
@@ -116,7 +124,9 @@ def save_to_obsidian(raw_data: dict, ai_data: dict):
         elif raw_data.get("site"): source = raw_data.get("site")
         file_name = f"{date_short}-{source}-{safe_title}__{hash6}.md"
 
-    dir_path = os.path.join(OBSIDIAN_ROOT, folder, year_month)
+    if folder_override:
+        folder = folder_override
+    dir_path = os.path.join(user_root, folder, year_month)
     os.makedirs(dir_path, exist_ok=True)
     full_path = os.path.join(dir_path, file_name)
     
@@ -128,7 +138,9 @@ def save_to_obsidian(raw_data: dict, ai_data: dict):
         "tags": ai_data.get("tags", []),
         "kb_title": safe_title,
         "doc_id": doc_id,
-        "url_hash": doc_id if url else ""
+        "url_hash": doc_id if url else "",
+        "user_id": raw_data.get("user_id", ""),
+        "folder": raw_data.get("folder", "")
     }
     
     frontmatter = "\n".join([f"{k}: {json.dumps(v, ensure_ascii=False) if isinstance(v, list) else v}" for k, v in meta.items()])
@@ -149,6 +161,19 @@ def save_to_vector_db(raw_data: dict, ai_data: dict, file_path: str, doc_id: str
     分块存入向量库，支持幂等更新（先删后写）
     """
     content = raw_data.get("content", "")
+    analysis_parts = []
+    summary = ai_data.get("summary")
+    analysis = ai_data.get("analysis")
+    if summary:
+        analysis_parts.append(f"摘要: {summary}")
+    if analysis:
+        if isinstance(analysis, dict):
+            for k, v in analysis.items():
+                analysis_parts.append(f"{k}: {v}")
+        else:
+            analysis_parts.append(f"分析: {analysis}")
+    if analysis_parts:
+        content = "\n\n".join(["【AI分析】\n" + "\n".join(analysis_parts), content])
     if len(content) < MIN_CONTENT_LENGTH:
         print("⚠️ 内容太短，跳过向量化")
         return 0 # 返回插入数量
@@ -185,6 +210,8 @@ def save_to_vector_db(raw_data: dict, ai_data: dict, file_path: str, doc_id: str
             "chunk_idx": i,
             "title": title,
             "category": category,
+            "user_id": raw_data.get("user_id", ""),
+            "folder": raw_data.get("folder", ""),
             "source": url,
             "file_path": file_path,
             "created_at": created_at
