@@ -53,3 +53,8 @@ AUTH_DB_PATH = os.path.join(DATA_DIR, "auth.db")
 JWT_SECRET = "change-me-local-secret"
 JWT_ALG = "HS256"
 JWT_EXP_MINUTES = 60 * 24 * 7
+
+# === Whisper (Voice) ===
+WHISPER_MODEL = "large-v3"
+WHISPER_DEVICE = "auto"
+WHISPER_COMPUTE_TYPE = "int8"

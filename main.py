@@ -42,6 +42,7 @@ from utils.auth import (
 )
 from utils.rebuild import rebuild_user_vectors
 from utils.daily_summary import generate_daily_summary, build_daily_list
+from utils.voice import transcribe_audio
 from core.retriever import hybrid_search
 from core.llm import call_llm_analysis
 from core.llm import chat as llm_chat
@@ -348,6 +349,46 @@ async def upload_file(
     }
     write_inbox_job(job)
     return {"status": "accepted", "job_id": job_id, "path": full_path}
+
+@app.post("/api/ingest_voice")
+async def ingest_voice(
+    authorization: str = Header(None),
+    file: UploadFile = File(...),
+    folder: str | None = Form(None),
+):
+    username = require_user(authorization)
+    suffix = os.path.splitext(file.filename or "")[1]
+    if not suffix:
+        suffix = ".wav"
+    tmp_path = os.path.join("/tmp", f"voice_{uuid.uuid4().hex}{suffix}")
+    with open(tmp_path, "wb") as f:
+        f.write(await file.read())
+
+    try:
+        text = transcribe_audio(tmp_path)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"语音转文字失败: {e}")
+    finally:
+        try:
+            os.remove(tmp_path)
+        except Exception:
+            pass
+
+    if not text.strip():
+        raise HTTPException(status_code=400, detail="语音内容为空")
+
+    job_id = str(uuid.uuid4())
+    job = {
+        "job_id": job_id,
+        "user_id": username,
+        "content": text,
+        "received_at": now_iso(),
+        "source": "voice",
+        "process_mode": "note",
+        "folder": folder,
+    }
+    write_inbox_job(job)
+    return {"status": "accepted", "job_id": job_id, "text": text[:200]}
 
 @app.post("/api/rebuild_vectors")
 async def api_rebuild_vectors(authorization: str = Header(None)):
