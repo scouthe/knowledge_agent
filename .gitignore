@@ -30,3 +30,9 @@ chroma_db/
 # dotenv
 .env
 .env.*
+
+# whisper models
+/models/
+models/
+**/models/
+**/faster-whisper-*/

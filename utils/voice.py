@@ -14,6 +14,7 @@ def get_whisper_model() -> WhisperModel:
                 _model = WhisperModel(
                     WHISPER_MODEL,
                     device=WHISPER_DEVICE,
+                    device_index=0,
                     compute_type=WHISPER_COMPUTE_TYPE,
                 )
     return _model
@@ -21,5 +22,12 @@ def get_whisper_model() -> WhisperModel:
 
 def transcribe_audio(path: str) -> str:
     model = get_whisper_model()
-    segments, _ = model.transcribe(path, beam_size=5)
-    return "".join([seg.text for seg in segments]).strip()
+    segments, _ = model.transcribe(
+        path,
+        beam_size=5,
+        vad_filter=True,
+        language="zh",  # 如果你主要中文，固定更快更准
+        temperature=0.0,
+        condition_on_previous_text=False,
+    )
+    return "".join(seg.text for seg in segments).strip()

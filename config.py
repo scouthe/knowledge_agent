@@ -24,6 +24,11 @@ ENCODING_AES_KEY = "3NTSa7EenJNAWnB4TVKb6AoffEedjFjfbcxcd56h3xR"
 LLM_API_URL = "http://localhost:1234/v1/chat/completions"
 LLM_MODEL = "qwen2.5-14b-instruct"
 
+# === VLM (Image) 配置 ===
+VLM_API_URL = "http://localhost:1234/v1/chat/completions"
+VLM_MODEL = "qwen/qwen3-vl-4b"
+IMAGE_OCR_ARTICLE_THRESHOLD = 200
+
 # === 爬虫配置 ===
 FAKE_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -55,6 +60,6 @@ JWT_ALG = "HS256"
 JWT_EXP_MINUTES = 60 * 24 * 7
 
 # === Whisper (Voice) ===
-WHISPER_MODEL = "large-v3"
-WHISPER_DEVICE = "auto"
+WHISPER_MODEL = "./models/faster-whisper-large-v3"
+WHISPER_DEVICE = "cpu"
 WHISPER_COMPUTE_TYPE = "int8"

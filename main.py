@@ -5,6 +5,7 @@ import json
 import os
 import re
 import time
+import shutil
 import xmltodict
 import chromadb
 from fastapi import FastAPI, Request, BackgroundTasks, HTTPException, Header, UploadFile, File, Form
@@ -43,10 +44,12 @@ from utils.auth import (
 from utils.rebuild import rebuild_user_vectors
 from utils.daily_summary import generate_daily_summary, build_daily_list
 from utils.voice import transcribe_audio
+from utils.image_ingest import analyze_image, build_image_filename, build_title, build_markdown
 from core.retriever import hybrid_search
 from core.llm import call_llm_analysis
 from core.llm import chat as llm_chat
-from core.storage import resolve_user_root
+from core.storage import resolve_user_root, save_to_vector_db
+from core.index import save_to_keyword_index
 
 app = FastAPI()
 
@@ -389,6 +392,130 @@ async def ingest_voice(
     }
     write_inbox_job(job)
     return {"status": "accepted", "job_id": job_id, "text": text[:200]}
+
+@app.post("/api/ingest_image")
+async def ingest_image(
+    authorization: str = Header(None),
+    file: UploadFile = File(...),
+    text: str | None = Form(None),
+    category: str | None = Form(None),
+    folder: str | None = Form(None),
+):
+    username = require_user(authorization)
+    job_id = str(uuid.uuid4())
+    append_job_event(job_id, "RUNNING", step="start", user_id=username)
+
+    suffix = os.path.splitext(file.filename or "")[1].lower() or ".jpg"
+    tmp_path = os.path.join("/tmp", f"image_{uuid.uuid4().hex}{suffix}")
+    with open(tmp_path, "wb") as f:
+        f.write(await file.read())
+
+    user_root = resolve_user_root(username)
+    now = time.localtime()
+    year = time.strftime("%Y", now)
+    month = time.strftime("%m", now)
+    day = time.strftime("%d", now)
+    image_dir = os.path.join(user_root, "images", year, month)
+    os.makedirs(image_dir, exist_ok=True)
+    image_name = f"{day}-{time.strftime('%H%M%S', now)}{suffix}"
+    image_path = os.path.join(image_dir, image_name)
+    if os.path.exists(image_path):
+        image_name = f"{day}-{time.strftime('%H%M%S', now)}_{uuid.uuid4().hex[:4]}{suffix}"
+        image_path = os.path.join(image_dir, image_name)
+    shutil.move(tmp_path, image_path)
+    image_rel = os.path.relpath(image_path, user_root).replace("\\", "/")
+
+    try:
+        append_job_event(job_id, "RUNNING", step="vlm", user_id=username)
+        info = analyze_image(image_path)
+    except Exception as e:
+        append_job_event(job_id, "FAILED", step="vlm", user_id=username, error=str(e))
+        raise HTTPException(status_code=500, detail=f"图片识别失败: {e}")
+
+    user_text = (text or "").strip()
+    is_text_heavy = info.get("is_text_heavy", False)
+    category_name = "个人笔记" if user_text else ("文章阅读" if is_text_heavy else "个人笔记")
+    subfolder = "Notes" if category_name == "个人笔记" else "Articles"
+
+    base_category = (category or "").strip()
+    if folder:
+        target_folder = folder.strip()
+    elif base_category:
+        target_folder = os.path.join(base_category, subfolder)
+    else:
+        target_folder = subfolder
+
+    title = build_title(user_text, info.get("description", ""))
+    with open(image_path, "rb") as f:
+        doc_id = build_image_filename(f.read(), user_text)
+    hash6 = doc_id[:6]
+
+    year_month = time.strftime("%Y-%m", now)
+    date_short = time.strftime("%m-%d", now)
+    note_ts = time.strftime("%m-%d_%H%M", now)
+    safe_title = title
+    if category_name == "个人笔记":
+        file_name = f"{note_ts}_{safe_title}__{hash6}.md"
+    else:
+        file_name = f"{date_short}-图片-{safe_title}__{hash6}.md"
+
+    dir_path = os.path.join(user_root, target_folder, year_month)
+    os.makedirs(dir_path, exist_ok=True)
+    full_path = os.path.join(dir_path, file_name)
+
+    created_at = time.strftime("%Y-%m-%d %H:%M:%S", now)
+    md = build_markdown(
+        title=safe_title,
+        created=created_at,
+        category=category_name,
+        doc_id=doc_id,
+        user_id=username,
+        image_rel_path=image_rel,
+        shot_time=info.get("shot_time", ""),
+        gps=info.get("gps", ""),
+        text=user_text,
+        description=info.get("description", ""),
+        ocr_text=info.get("ocr_text", ""),
+        folder=target_folder,
+    )
+
+    with open(full_path, "w", encoding="utf-8") as f:
+        f.write(md)
+
+    content_parts = []
+    if user_text:
+        content_parts.append(user_text)
+    if info.get("description"):
+        content_parts.append(f"图片描述: {info['description']}")
+    if info.get("ocr_text"):
+        content_parts.append(f"OCR: {info['ocr_text']}")
+    combined = "\n".join(content_parts).strip()
+
+    raw_data = {
+        "doc_id": doc_id,
+        "title": safe_title,
+        "content": combined,
+        "category": category_name,
+        "created_at": created_at,
+        "user_id": username,
+        "folder": target_folder,
+        "source": "image",
+    }
+    ai_data = {
+        "kb_title": safe_title,
+        "tags": [],
+    }
+
+    try:
+        append_job_event(job_id, "RUNNING", step="save_vector_start", user_id=username)
+        save_to_vector_db(raw_data, ai_data, full_path, doc_id)
+        save_to_keyword_index(raw_data, ai_data)
+        append_job_event(job_id, "SUCCESS", step="done", user_id=username, message="图片入库完成")
+    except Exception as e:
+        append_job_event(job_id, "FAILED", step="save_error", user_id=username, error=str(e))
+        raise HTTPException(status_code=500, detail=f"入库失败: {e}")
+
+    return {"status": "accepted", "job_id": job_id, "path": full_path}
 
 @app.post("/api/rebuild_vectors")
 async def api_rebuild_vectors(authorization: str = Header(None)):
